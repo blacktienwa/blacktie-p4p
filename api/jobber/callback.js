@@ -29,9 +29,10 @@ export default async function handler(req, res) {
     storeTokens(state, tok);
     await state.save();
 
-    const data = await gql(tok.access_token, ACCOUNT_QUERY);
+    let companyName = 'your Jobber account';
+    try { companyName = (await gql(tok.access_token, ACCOUNT_QUERY)).account.name; } catch (e) { companyName = `your Jobber account (name lookup failed: ${e.message})`; }
     res.setHeader('set-cookie', 'p4p_oauth=; HttpOnly; Secure; SameSite=Lax; Path=/api/jobber; Max-Age=0');
-    send(res, 200, page('Jobber connected', `<p>Connected to <strong>${escapeHtml(data.account.name)}</strong>.</p><p>The tokens are stored encrypted in the sheet's <code>Sync State</code> tab. You can close this page. Next: run the first sync at <code>/api/sync?key=YOUR_SETUP_KEY</code>.</p>`), 'text/html');
+    send(res, 200, page('Jobber connected', `<p>Connected to <strong>${escapeHtml(companyName)}</strong>.</p><p>The tokens are stored encrypted in the sheet's <code>Sync State</code> tab. You can close this page. Next: run the first sync at <code>/api/sync?key=YOUR_SETUP_KEY</code>.</p>`), 'text/html');
   } catch (e) {
     send(res, 500, page('Connection failed', `<p>${escapeHtml(e.message || e)}</p><p>You can try again from <code>/api/jobber/connect</code>.</p>`), 'text/html');
   }
