@@ -62,3 +62,4 @@ Then check the sheet: `Jobber Time` filled in, `Jobber Users` listing everyone, 
 - **Employee not linked:** see `Sync Log` notes. Copy that person's ID from the `Jobber Users` tab into `Employees!B` by hand.
 - **Schedule:** edit `vercel.json` (times are UTC; `0 12,17,22 * * *` is 7am, 12pm and 5pm Central daylight time).
 - **Tests:** `npm test` runs the logic checks against fake Jobber and Google services.
+
