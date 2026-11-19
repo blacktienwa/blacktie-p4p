@@ -2,6 +2,10 @@
   "functions": {
     "api/sync.js": { "maxDuration": 300 }
   },
+  "rewrites": [
+    { "source": "/d/:code", "destination": "/api/dash?kind=d&code=:code" },
+    { "source": "/a/:code", "destination": "/api/dash?kind=a&code=:code" }
+  ],
   "crons": [
     { "path": "/api/sync", "schedule": "0 12,17,22 * * *" }
   ]
