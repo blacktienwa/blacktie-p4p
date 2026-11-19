@@ -1,12 +1,27 @@
 {
   "functions": {
-    "api/sync.js": { "maxDuration": 300 }
+    "api/sync.js": {
+      "maxDuration": 300
+    }
   },
   "rewrites": [
-    { "source": "/d/:code", "destination": "/api/dash?kind=d&code=:code" },
-    { "source": "/a/:code", "destination": "/api/dash?kind=a&code=:code" }
+    {
+      "source": "/d/:code",
+      "destination": "/api/dash?kind=d&code=:code"
+    },
+    {
+      "source": "/a/:code",
+      "destination": "/api/dash?kind=a&code=:code"
+    }
   ],
   "crons": [
-    { "path": "/api/sync", "schedule": "0 12,17,22 * * *" }
+    {
+      "path": "/api/sync",
+      "schedule": "*/30 11-23,0-1 * * *"
+    },
+    {
+      "path": "/api/sync",
+      "schedule": "0 2-10 * * *"
+    }
   ]
 }
