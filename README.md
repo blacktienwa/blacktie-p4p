@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/35164184/README.md)
 # Black Tie P4P sync (stage 1: time entries)
 
 Pulls clocked time from Jobber into your Google Sheet several times a day. Money math stays in the sheet's formulas.
@@ -63,3 +64,35 @@ Then check the sheet: `Jobber Time` filled in, `Jobber Users` listing everyone, 
 - **Schedule:** edit `vercel.json` (times are UTC; `0 12,17,22 * * *` is 7am, 12pm and 5pm Central daylight time).
 - **Tests:** `npm test` runs the logic checks against fake Jobber and Google services.
 
+
+## Cafeteria plan and leaderboard
+
+**What it does**
+- Every payroll period set to **Frozen** earns each eligible person a deposit: hours worked in the period (overtime included) × their $/hr rate × their hours-tier %.
+  - **Rate** comes from the cafeteria sheet's `Rates` tab, using their Role (Technician or Mgmt) and completed years since Hire Date at the end of the period.
+  - **Hours tier** comes from `Hours Tiers`: their average weekly hours over the last 6 months (25 or less = 25%, over 25 and under 30 = 75%, 30 or more = 100%). Weeks before their hire date, or before the Jobber time history starts, are left out of the average.
+  - The deposit is split into banks by their split % on `Employees`.
+- Each sync also posts approved withdrawal requests and rewrites the `Balances` tab.
+- Employees see their bank balances, last deposit, request form, request status and recent activity on their page. A request larger than the available amount (balance minus requests already waiting) is refused.
+- The leaderboard shows the top 10 from the last frozen payroll: P4P after yellow and red cards ÷ hours worked, plus efficiency (actual hours ÷ budget hours on the jobs paid that payroll). People outside the top 10 also see their own rank. The admin page shows everyone.
+
+### One-time setup
+1. In Google Drive create a blank Google Sheet named **Black Tie Cafeteria Plan**. Click **Share**, add the service account's email (the `client_email` from the Google key, the same one the main sheet is shared with) as **Editor**.
+2. Copy the new sheet's ID: the long part of its address between `/d/` and `/edit`.
+3. In Vercel: **Settings -> Environment Variables**, add `CAFE_SHEET_ID` = that ID (all environments). Then **Deployments -> ... -> Redeploy**.
+4. Open `https://YOUR-PROJECT.vercel.app/api/cafe?key=YOUR_SETUP_KEY`. It builds the tabs and lists everyone from Jobber on `Employees`. Jake Welch, Kyle Ungerer and Ramon Casillas are set to Eligible = No. Tyler Eldridge, Kat Weaver and Tony Spencer are added as cafeteria-only.
+5. On the cafeteria sheet's `Employees` tab, fill in for each eligible person: **Role** (`Technician` or `Mgmt`), **Hire Date**, a **split %** for each bank (must total 100), and an **opening $** for each bank (their balance as of the end of the last payroll before the start period).
+6. On `Settings`, check **Start deposits with period**. It defaults to the next payroll that isn't frozen yet. Opening balances must cover everything before it.
+7. Open `https://YOUR-PROJECT.vercel.app/api/access?key=YOUR_SETUP_KEY` once more. It creates links and PINs for Tyler, Kat and Tony (shown once, like before).
+
+To post right away instead of waiting for the next sync, open the cafe link with `&run=1` on the end.
+
+### Day to day
+- **Approve or deny a request:** on the `Requests` tab, set Status to `Approved` or `Denied` (add an Office Note if you like). Approved requests post as withdrawals at the next sync. If the bank no longer covers the request, it is not posted and column I says why.
+- **Withdrawals the office makes directly:** add a row on `Ledger`: date, employee, bank, type `Withdrawal`, a positive amount, and a note. Leave the Key column empty. Use type `Adjustment` with a + or - amount for corrections.
+- **Don't edit** `Deposits`, `Balances`, or the Key column. Deposits post once per person per period; to redo one, delete that person's row on `Deposits` and their `DEP|...` rows on `Ledger`, then run a sync.
+- **Adding a bank:** add its name to `Banks` on `Settings`, then open the cafe setup link again to add its columns.
+- Setup problems (missing role, hire date, or a split that isn't 100%) appear in the `Sync Log` as warnings. That person's deposit posts at the first sync after it's fixed.
+
+## Page tabs
+Each person's page has tabs: **Pay** (P4P people), **Benefits** (cafeteria plan members), **Leaderboard** and **Standards** (everyone). The Standards text lives in `lib/standards.js`; edit the wording there and upload that file to change it.
