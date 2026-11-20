@@ -5,6 +5,6 @@
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
-    "test": "node --test test/sync.test.js"
+    "test": "node --test test/sync.test.js test/cafe.test.js"
   }
 }
