@@ -5,6 +5,7 @@ import { params, send } from '../lib/http.js';
 import { renderAccessPage } from '../lib/render.js';
 import { TAB } from '../lib/tabs.js';
 import { ensureTabs } from '../lib/tabs.js';
+import { cafeSheet, loadPlan } from '../lib/cafe.js';
 
 // Office page: /api/access?key=SETUP_KEY
 // Creates a link and PIN for every active employee (and the admins) who has none, and shows PINs once.
@@ -16,6 +17,13 @@ export default async function handler(req, res) {
     const sh = sheetsApi(process.env.SHEET_ID);
     await ensureTabs(sh);
     const emps = (await sh.get(`'${TAB.emp}'!A2:G60`)).filter((r) => r[0] && String(r[4] ?? 'Yes').toLowerCase() !== 'no').map((r) => ({ name: String(r[0]), role: 'employee' }));
+    // Cafeteria-plan-only staff (no P4P) get an employee link too
+    const cs = cafeSheet();
+    if (cs) {
+      const have = new Set(emps.map((x) => x.name));
+      const plan = await loadPlan(cs).catch(() => null); // cafeteria sheet not set up yet: skip
+      for (const c of plan?.employees || []) if (c.eligible && !have.has(c.name)) { emps.push({ name: c.name, role: 'employee' }); have.add(c.name); }
+    }
     const admins = (process.env.ADMIN_NAMES || 'Deric,Jeremy').split(',').map((s) => s.trim()).filter(Boolean).map((name) => ({ name, role: 'admin' }));
     const created = await ensureAccess(sh, [...emps, ...admins]);
     if (p.get('reset')) {
