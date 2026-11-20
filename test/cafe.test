@@ -1,0 +1,201 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { serial } from '../lib/transform.js';
+import {
+  yearsOfService, rateFor, tierFor, avgWeekly, readSplit, splitAmount, roleKey, toSerial,
+  setupCafe, runCafe, loadPlan, checkRequest, saveRequest, computeBalances, CT,
+} from '../lib/cafe.js';
+import { leaderboardFor, buildView } from '../lib/dashdata.js';
+
+// Minimal in-memory Google Sheet with the same methods as sheetsApi()
+const colIdx = (s) => [...s].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+function fakeSheet(tabs = {}) {
+  const sheets = tabs;
+  const parse = (range) => {
+    const m = /^(?:'([^']+)'|([^!]+))!([A-Z]+)(\d+)?(?::([A-Z]+)(\d+)?)?$/.exec(range);
+    if (!m) throw new Error(`bad range ${range}`);
+    return { t: m[1] || m[2], c1: colIdx(m[3]), r1: (Number(m[4]) || 1) - 1, c2: m[5] ? colIdx(m[5]) : colIdx(m[3]), r2: m[6] ? Number(m[6]) - 1 : null };
+  };
+  const rows = (t) => { if (!sheets[t]) throw new Error(`no tab ${t}`); return sheets[t]; };
+  return {
+    sheets,
+    meta: async () => ({ sheets: Object.keys(sheets).map((title, i) => ({ properties: { title, sheetId: i + 1 } })) }),
+    batch: async (reqs) => { for (const r of reqs) if (r.addSheet) sheets[r.addSheet.properties.title] = []; },
+    get: async (range) => {
+      const p = parse(range); const R = rows(p.t);
+      const out = R.slice(p.r1, p.r2 === null ? R.length : p.r2 + 1).map((r) => Array.from({ length: p.c2 - p.c1 + 1 }, (_, j) => (r || [])[p.c1 + j] ?? ''));
+      const trimmed = out.map((r) => { const a = [...r]; while (a.length && a[a.length - 1] === '') a.pop(); return a; });
+      while (trimmed.length && !trimmed[trimmed.length - 1].length) trimmed.pop();
+      return trimmed;
+    },
+    put: async (range, values) => { const p = parse(range); const R = rows(p.t); values.forEach((v, i) => { while (R.length <= p.r1 + i) R.push([]); v.forEach((x, j) => { R[p.r1 + i][p.c1 + j] = x; }); }); },
+    append: async (range, values) => { const R = rows(parse(range).t); let n = R.length; while (n > 1 && !(R[n - 1] || []).some((x) => x !== '' && x !== undefined)) n--; R.length = n; R.push(...values.map((v) => [...v])); },
+    clear: async (range) => { const p = parse(range); const R = rows(p.t); for (let r = p.r1; r <= (p.r2 ?? R.length - 1) && r < R.length; r++) for (let c = p.c1; c <= p.c2; c++) if (R[r]) R[r][c] = ''; },
+  };
+}
+
+const S = (d) => serial(d);
+
+test('years of service, roles, rates and hours tiers', () => {
+  assert.equal(yearsOfService(S('2024-11-15'), S('2026-11-14')), 1);
+  assert.equal(yearsOfService(S('2024-11-15'), S('2026-11-15')), 2);
+  assert.equal(roleKey('Lead Technician'), 'mgmt');
+  assert.equal(roleKey('Project Manager'), 'mgmt');
+  assert.equal(roleKey('Technician'), 'tech');
+  const rates = [[0, 1, 1, 1.4], [1, 2, 1.2, 1.6], [2, 4, 1.4, 1.8], [4, 6, 1.6, 2], [6, 8, 1.8, 2.2], [8, null, 2, 2.4]].map(([from, to, tech, mgmt]) => ({ from, to, tech, mgmt }));
+  assert.equal(rateFor(rates, 'tech', 0), 1);
+  assert.equal(rateFor(rates, 'tech', 3), 1.4);
+  assert.equal(rateFor(rates, 'mgmt', 8), 2.4);
+  assert.equal(rateFor(rates, 'mgmt', 20), 2.4);
+  const tiers = [{ min: 0, pct: 0.25 }, { min: 25.01, pct: 0.75 }, { min: 30, pct: 1 }];
+  assert.equal(tierFor(tiers, 25), 0.25);
+  assert.equal(tierFor(tiers, 25.004), 0.25);
+  assert.equal(tierFor(tiers, 25.01), 0.75);
+  assert.equal(tierFor(tiers, 29.99), 0.75);
+  assert.equal(tierFor(tiers, 30), 1);
+  assert.equal(toSerial('3/15/2021'), S('2021-03-15'));
+});
+
+test('average weekly hours only counts weeks after hire and after the data starts', () => {
+  const end = S('2026-11-14');
+  const e = Array.from({ length: 28 }, (_, i) => ({ date: end - i, hours: 8 })); // 8 h/day for 4 weeks = 56 h/wk
+  assert.equal(Math.round(avgWeekly(e, end, { dataStart: end - 27 })), 56);
+  assert.equal(Math.round(avgWeekly(e, end, { windowDays: 182 })), Math.round((28 * 8) / 26));
+  assert.equal(Math.round(avgWeekly(e, end, { hire: end - 13 })), 56);
+});
+
+test('split % accepts 50 or 0.5 style, must total 100%, and splits to the cent', () => {
+  assert.deepEqual(readSplit([50, 30, 20, 0]).split, [0.5, 0.3, 0.2, 0]);
+  assert.deepEqual(readSplit([0.5, 0.5, '', '']).split, [0.5, 0.5, 0, 0]);
+  assert.match(readSplit([50, 30, 10, 0]).error, /90%/);
+  const parts = splitAmount(10, [1 / 3, 1 / 3, 1 / 3, 0]);
+  assert.equal(Math.round(parts.reduce((a, b) => a + b, 0) * 100), 1000);
+});
+
+function mainSheet() {
+  const p1 = ['PP-2026-11-01', S('2026-11-01'), S('2026-11-14'), S('2026-11-23'), 'Frozen'];
+  const p2 = ['PP-2026-11-15', S('2026-11-15'), S('2026-11-28'), S('2026-12-07'), 'Open'];
+  const time = [['ID', 'Date', 'User', 'Job', 'Hours', 'OT']];
+  // Alex: 40 h/week for the whole history (Aug 1 onward) -> 100% tier, 80 h in the period
+  // Tyler: 20 h/week -> 25% tier
+  for (let d = S('2026-08-03'); d <= S('2026-11-28'); d++) {
+    const dow = (d + 6) % 7; // 0 = Saturday on serials... use weekday check below
+    const wd = new Date(Date.UTC(1899, 11, 30) + d * 86400000).getUTCDay();
+    if (wd === 0 || wd === 6) continue;
+    time.push([`Z2lkA${d}`, d, 'U-ALEX', 101, 8, 0]);
+    time.push([`Z2lkT${d}`, d, 'U-TYLER', 102, 4, 0]);
+    time.push([`Z2lkJ${d}`, d, 'U-JAKE', 101, 8, 0]);
+    void dow;
+  }
+  return fakeSheet({
+    'Payroll Periods': [['ID', 'Start', 'End', 'Pay', 'Status'], p1, p2],
+    'Jobber Time': time,
+    Employees: [['Name', 'Jobber ID'], ['Alex Rivera', 'U-ALEX'], ['Jake Welch', 'U-JAKE']],
+    'Jobber Users': [['ID', 'Name', 'Mapped'], ['U-ALEX', 'Alex Rivera', 'Alex Rivera'], ['U-JAKE', 'Jake Welch', 'Jake Welch'], ['U-TYLER', 'Tyler Eldridge', '']],
+  });
+}
+
+test('setup, deposits, requests: end to end with no duplicates', async () => {
+  const sh = mainSheet();
+  const cs = fakeSheet({ Sheet1: [] });
+  process.env.BACKFILL_START = '2026-08-01';
+  await setupCafe(sh, cs);
+  for (const t of Object.values(CT)) assert.ok(cs.sheets[t], `tab ${t}`);
+  let plan = await loadPlan(cs);
+  assert.equal(plan.startPeriod, 'PP-2026-11-15'); // first period not yet frozen
+  const byName = Object.fromEntries(plan.employees.map((e) => [e.name, e]));
+  assert.equal(byName['Jake Welch'].eligible, false);
+  assert.equal(byName['Tyler Eldridge'].eligible, true);
+  assert.equal(byName['Tyler Eldridge'].userId, 'U-TYLER');
+  assert.ok(byName['Kat Weaver'] && byName['Tony Spencer']);
+  assert.deepEqual(plan.banks, ['PTO', 'Education', 'Tool Allowance', 'Health']);
+
+  // Office fills in the Employees tab
+  const E = cs.sheets[CT.emp];
+  const head = E[0];
+  const set = (name, vals) => { const r = E.find((x) => x[0] === name); for (const [h, v] of Object.entries(vals)) r[head.indexOf(h)] = v; };
+  set('Alex Rivera', { 'Role (Technician / Mgmt)': 'Lead Technician', 'Hire Date': S('2021-06-01'), 'PTO split %': 50, 'Education split %': 25, 'Tool Allowance split %': 25, 'PTO opening $': 100 });
+  set('Tyler Eldridge', { 'Role (Technician / Mgmt)': 'Technician', 'Hire Date': '2025-01-10', 'Health split %': 100 });
+  // Start with the already-frozen period so this run posts it
+  cs.sheets[CT.settings].find((r) => r[0] === 'Start deposits with period')[1] = 'PP-2026-11-01';
+
+  const r1 = await runCafe({ sh, cs, now: Date.parse('2026-11-20T15:00:00Z') });
+  assert.ok(r1.notes.some((n) => /waiting on setup/.test(n)), 'Kat and Tony are not set up yet'); // warns, does not crash
+  plan = await loadPlan(cs);
+  const alex = plan.deposits.find((d) => d.employee === 'Alex Rivera');
+  // Alex: 80 h, 5 years -> Mgmt 4-6 = $2.00, 40 h/wk avg -> 100%  => $160
+  assert.equal(alex.hours, 80);
+  assert.equal(alex.rate, 2);
+  assert.equal(alex.pct, 1);
+  assert.equal(alex.amount, 160);
+  const tyler = plan.deposits.find((d) => d.employee === 'Tyler Eldridge');
+  // Tyler: 40 h, 1 year -> Tech $1.20, 20 h/wk avg -> 25%  => $12
+  assert.equal(tyler.amount, 12);
+  assert.equal(plan.deposits.filter((d) => d.employee === 'Jake Welch').length, 0);
+  let bal = computeBalances(plan);
+  assert.equal(bal.get('Alex Rivera').get('PTO'), 180); // 100 opening + 80
+  assert.equal(bal.get('Alex Rivera').get('Education'), 40);
+  assert.equal(bal.get('Tyler Eldridge').get('Health'), 12);
+
+  // Running again posts nothing twice
+  await runCafe({ sh, cs, now: Date.parse('2026-11-20T16:00:00Z') });
+  plan = await loadPlan(cs);
+  assert.equal(plan.deposits.length, 2);
+  assert.equal(plan.ledger.filter((l) => l.type === 'Deposit').length, 4);
+
+  // Requests: blocked over the balance, allowed within it, pending money is held
+  assert.match(checkRequest(plan, 'Alex Rivera', { bank: 'PTO', amount: '180.01', reason: 'Dec 22-23 off' }).error, /\$180\.00 available/);
+  const ok = checkRequest(plan, 'Alex Rivera', { bank: 'PTO', amount: '150', reason: 'Dec 22-23 off' });
+  assert.ok(ok.ok);
+  const id = await saveRequest(cs, 'Alex Rivera', ok);
+  plan = await loadPlan(cs);
+  assert.match(checkRequest(plan, 'Alex Rivera', { bank: 'PTO', amount: '31', reason: 'more' }).error, /\$30\.00 available/);
+  assert.match(checkRequest(plan, 'Jake Welch', { bank: 'PTO', amount: '1', reason: 'x y z' }).error, /not set up/);
+
+  // Office approves -> next sync posts the withdrawal once
+  const row = cs.sheets[CT.requests].find((r) => r[0] === id);
+  row[6] = 'Approved';
+  await runCafe({ sh, cs });
+  await runCafe({ sh, cs });
+  plan = await loadPlan(cs);
+  assert.equal(plan.ledger.filter((l) => l.type === 'Withdrawal').length, 1);
+  bal = computeBalances(plan);
+  assert.equal(bal.get('Alex Rivera').get('PTO'), 30);
+  assert.match(plan.requests[0].posted, /^Posted/);
+
+  // Office withdrawal typed straight into the Ledger tab
+  cs.sheets[CT.ledger].push(['11/20/2026', 'Tyler Eldridge', 'Health', 'Withdrawal', 5, '', 'Copay', 'office', '']);
+  plan = await loadPlan(cs);
+  assert.equal(computeBalances(plan).get('Tyler Eldridge').get('Health'), 7);
+
+  // Balances tab is written
+  const B = cs.sheets[CT.balances];
+  assert.equal(B[0][0], 'Employee');
+  assert.ok(B.some((r) => r[0] === 'Alex Rivera'));
+});
+
+test('leaderboard: P4P after cards per hour, efficiency = actual / budget hours', () => {
+  const hist = (name, hours, net) => ['PP-2026-11-01', 0, 0, name, 0, hours, 0, 0, net + 10, 10, net];
+  const data = {
+    periods: [{ id: 'PP-2026-11-01', start: 1, end: 14, pay: 20, status: 'frozen' }],
+    history: [hist('A', 80, 400), hist('B', 40, 300), hist('C', 0, 0), hist('D', 50, 100)],
+    // job, employee, period, budget, pool, empHours, totalHours
+    payHist: [[1, 'A', 'PP-2026-11-01', 100, 0, 60, 120], [1, 'B', 'PP-2026-11-01', 100, 0, 60, 120], [2, 'A', 'PP-2026-11-01', 50, 0, 20, 20]],
+  };
+  const lb = leaderboardFor(data, 'PP-2026-11-01');
+  assert.deepEqual(lb.map((r) => r.name), ['B', 'A', 'D']); // 7.50, 5.00, 2.00 $/hr; C has no hours
+  const a = lb.find((r) => r.name === 'A');
+  // A: 80 actual; budget share 100*60/120 + 50 = 100  -> 80%
+  assert.equal(Math.round(a.efficiency * 100), 80);
+  assert.equal(lb.find((r) => r.name === 'B').efficiency, 120 / 100);
+  assert.equal(lb.find((r) => r.name === 'D').efficiency, null);
+});
+
+test('cafeteria-only staff get a page with no P4P sections', async () => {
+  const data = { employees: [], periods: [], history: [], payHist: [], preview: null };
+  const plan = { banks: ['PTO'], employees: [{ name: 'Kat Weaver', eligible: true, opening: [25], split: [100] }], ledger: [], requests: [], deposits: [] };
+  const v = buildView(data, 'Kat Weaver', plan);
+  assert.equal(v.p4p, false);
+  assert.equal(v.cafe.total, 25);
+  assert.equal(buildView(data, 'Nobody', plan), null);
+});
